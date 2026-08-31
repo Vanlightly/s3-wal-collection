@@ -1,0 +1,3 @@
+# TLC-generated state databases and counterexample traces.
+states/
+**.toolbox/
