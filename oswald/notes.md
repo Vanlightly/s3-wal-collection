@@ -10,6 +10,7 @@ The basic action sequences, see the TLA+ for the nuances.
 
 ## Writer initialization
 
+```
 [SNAPSHOT_RECOVERY]
           |
           | SnapshotRecovery
@@ -18,57 +19,64 @@ The basic action sequences, see the TLA+ for the nuances.
           |                |
     CatchupRecovery        |
           |                |
-          |    chunk found |
+          |  (chunk found) |
           +----------------+
           |
-          | no chunk found
+          | (no chunk found)
           |
           v
       [VALIDATE]
           |
        Validate
-        |     |
-        |     | validation fails
-        |     v
+        |    |
+        |    | (validation fails)
+        |    v
         |  [SNAPSHOT_RECOVERY]
         |
-        | validation succeeds
+        | (validation succeeds)
         v
       [READY]
+```
 
 ## Writer append
 
-                           write conflict
-                    +------------------------------+
-                    |                              v
-  [READY] --AppendChunk--> [VALIDATE]      [CATCHUP_RECOVERY]
-                               |
-                               | Validate
-                               |
-                   +-----------+-----------+
-                   |                       |
-                   | succeeds              | fails
-                   v                       v
-                [READY]          [SNAPSHOT_RECOVERY]
+```
+                    +--(write conflict)-->[CATCHUP_RECOVERY]
+                    |                              
+  [READY] --AppendChunk--(ok)-->[VALIDATE]      
+                                    |
+                                 Validate
+                                    |
+                        +-----------+-----------+
+                        |                       |
+                        | (succeeds)            | (fails)
+                        v                       v
+                     [READY]          [SNAPSHOT_RECOVERY]
+```
 
 ## Writer snapshot
 
-  [READY] --WriteSnapshot----no-conflict----> [UPDATE_MANIFEST]
+```
+  [READY] --WriteSnapshot--(no-conflict)--> [UPDATE_MANIFEST]
                  |                                 |
-              conflict                        UpdateManifest
+             (conflict)                      UpdateManifest
                  |                                 |
                  +-------------->[READY]<----------+
+```
 
-  ## Garbage collection
+## Garbage collection
 
-  The GC process stays in DELETE until there are no more chunks at LSNs <= the GC watermark to delete and no more snapshots at LSNs < watermark.
+The GC process stays in DELETE until there are no more chunks at LSNs <= the GC watermark to delete and no more snapshots at LSNs < watermark.
 
+```
   [READY] --AdvanceGcWatermark--> [DELETE]
      ^                                |
      |                    +-----------+-----------+
      |                    |                       |
-     |                    | DeleteChunk           | DeleteSnapshot
+     |                DeleteChunk            DeleteSnapshot
+     |                    |                       | 
      |                    v                       v
      |                 [DELETE]                [DELETE]
      |                    |                       |
      +--------------------+-----------------------+
+```
