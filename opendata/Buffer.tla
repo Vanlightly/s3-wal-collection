@@ -2,14 +2,15 @@
 
 EXTENDS Naturals, Integers, FiniteSets, FiniteSetsExt, Sequences, TLC
 
-CONSTANTS Writers,
-          Readers,
-          Ids,
-          Values
+CONSTANTS Writers,  \* The set of writer processes
+          Readers,  \* The set of reader processes
+          Ids,      \* The set of object ids
+          Values    \* The set of values to append
 
+\* Reader/writer states
 CONSTANTS IDLE, READ_MANIFEST, APPEND_TO_MANIFEST, 
-          READ_ENTRY, INCREMENT_EPOCH, RETRY_ACK, COMMIT, 
-          PREFIX_TRIM, PREEMPTED
+          INCREMENT_EPOCH, READ_CURSOR, CLAIM_CURSOR, READ_ENTRY, START_ACK,  
+          COMMIT, PREFIX_TRIM, PREEMPTED, INVALID_STATE
 
 CONSTANTS NIL
 
@@ -18,16 +19,18 @@ ASSUME Cardinality(Ids) = Cardinality(Values)
 WritableSeqNos == 1..Cardinality(Values)
 NextSeqNos == 1..Cardinality(Values) + 1
 
-VARIABLES batches,
-          manifest,
-          cursor,
-          wState,
-          wPendingBatch,
-          wManifest,
-          rState,
-          rCursor,
-          rManifest,
-          auxUsedValues,
+VARIABLES batches,          \* The batch objects written to S3 (one value per object in this spec)
+          manifest,         \* The manifest file in S3
+          cursor,           \* The reader cursor in S3
+          wState,           \* Writer -> state
+          wPendingBatch,    \* Writer -> pending commit batch id
+          wManifest,        \* Writer -> local copy of the manifest
+          rState,           \* Reader -> state
+          rCursor,          \* Reader -> local copy of the cursor
+          rManifest         \* Reader -> local copy of the manifest
+
+\* Auxilliary variables for invariants
+VARIABLES auxUsedValues, 
           auxUsedIds,
           auxWrittenValues,
           auxReadValues
@@ -38,11 +41,19 @@ storeVars == <<batches, manifest, cursor>>
 auxVars == <<auxUsedValues, auxUsedIds, auxReadValues, auxWrittenValues>>
 vars == <<storeVars, writerVars, readerVars, auxVars>>
 
+Symmetry ==
+    Permutations(Writers)
+        \union Permutations(Readers)
+        \union Permutations(Ids)
+        \union Permutations(Values)
+
 Read(id) == batches[id]
 
 \***********************************************************************
 \* ACTIONS
 \***********************************************************************
+
+(* WRITER ACTIONS --------------------------------------*)
 
 WriteBatch(w, v) ==
     /\ wState[w] = IDLE
@@ -83,6 +94,8 @@ AppendToManifest(w) ==
              /\ UNCHANGED <<manifest, wManifest, wPendingBatch, auxWrittenValues>>
     /\ UNCHANGED <<readerVars, batches, cursor, auxUsedValues, auxUsedIds, auxReadValues>>
 
+(* READER ACTIONS --------------------------------------*)
+
 ReaderInitialize(r) ==
     /\ rState[r] = IDLE
     /\ rManifest' = [rManifest EXCEPT ![r] = manifest]
@@ -93,44 +106,69 @@ ReaderInitialize(r) ==
 IncrementManifestEpoch(r) ==
     /\ rState[r] = INCREMENT_EPOCH
     /\ \/ /\ manifest.version > rManifest[r].version
-          /\ rState' = [rState EXCEPT ![r] = PREEMPTED] 
+          /\ rState' = [rState EXCEPT ![r] = IDLE] 
           /\ UNCHANGED <<manifest, rManifest>>
        \/ /\ manifest.version = rManifest[r].version
           /\ LET newManifest == [rManifest[r] EXCEPT !.epoch = @ + 1,
                                                      !.version = @ + 1]
-             IN
-                /\ manifest' = newManifest
+             IN /\ manifest' = newManifest
                 /\ rManifest' = [rManifest EXCEPT ![r] = newManifest]
-                /\ rState' = [rState EXCEPT ![r] = READ_ENTRY]
+                /\ rState' = [rState EXCEPT ![r] = CLAIM_CURSOR]
     /\ UNCHANGED <<writerVars, auxVars, batches, cursor, rCursor>>
+
+ClaimCursor(r) ==
+    /\ rState[r] = CLAIM_CURSOR
+    /\ \/ /\ rCursor[r].version /= cursor.version
+          /\ rState' = [rState EXCEPT ![r] = IDLE]
+          /\ UNCHANGED <<cursor, rCursor>>
+       \/ /\ rCursor[r].version = cursor.version
+          /\ LET newCursor == [cursor EXCEPT !.version = @ + 1]
+             IN 
+                /\ cursor' = newCursor
+                /\ rCursor' = [rCursor EXCEPT ![r] = newCursor]
+                /\ rState' = [rState EXCEPT ![r] = READ_ENTRY]
+    /\ UNCHANGED <<writerVars, auxVars, manifest, batches, rManifest>>
+
+InvalidCursor(r) ==
+    \/ /\ Cardinality(DOMAIN rManifest[r].entries) = 0
+       /\ rCursor[r].nextSeq < rManifest[r].nextSeq
+    \/ /\ Cardinality(DOMAIN rManifest[r].entries) > 0
+       /\ rCursor[r].nextSeq < Min(DOMAIN rManifest[r].entries)
 
 ReadEntry(r, id) ==
     /\ rState[r] = READ_ENTRY
-    /\ \E seq \in DOMAIN rManifest[r].entries :
-        /\ seq = rCursor[r].nextSeq
-        /\ id = rManifest[r].entries[seq]
-        /\ auxReadValues' = Append(auxReadValues, Read(id))
-        /\ rCursor' = [rCursor EXCEPT ![r].nextSeq = @ + 1]
+    /\ IF InvalidCursor(r) THEN
+            /\ rState' = [rState EXCEPT ![r] = INVALID_STATE]
+            /\ UNCHANGED <<auxReadValues, rCursor>>
+       ELSE
+            \E seq \in DOMAIN rManifest[r].entries :
+                /\ seq = rCursor[r].nextSeq
+                /\ id = rManifest[r].entries[seq]
+                /\ auxReadValues' = Append(auxReadValues, Read(id))
+                /\ rCursor' = [rCursor EXCEPT ![r].nextSeq = @ + 1]
+                /\ UNCHANGED rState
     /\ UNCHANGED <<storeVars, writerVars, auxUsedIds, auxUsedValues,
-                   auxWrittenValues, rManifest, rState>>
+                   auxWrittenValues, rManifest>>
 
-SaveCursor(r) ==
+AckNeeded(r) ==
+    \E seq \in DOMAIN manifest.entries :
+        seq < rCursor[r].nextSeq
+
+AckPersistCursor(r) ==
     /\ rState[r] = READ_ENTRY
+    /\ AckNeeded(r)
     /\ \/ /\ rCursor[r].version /= cursor.version
           /\ rState' = [rState EXCEPT ![r] = PREEMPTED]
           /\ UNCHANGED <<cursor, rCursor>>
        \/ /\ rCursor[r].version = cursor.version
-          /\ \/ rCursor[r].nextSeq > cursor.nextSeq
-             \/ rCursor[r].ackSeq > cursor.ackSeq
+          /\ rState' = [rState EXCEPT ![r] = START_ACK]
           /\ LET newCursor == [rCursor[r] EXCEPT !.version = @ + 1]
-             IN /\ cursor' = newCursor 
+             IN /\ cursor' = newCursor
                 /\ rCursor' = [rCursor EXCEPT ![r] = newCursor]
-                /\ UNCHANGED rState
     /\ UNCHANGED <<writerVars, auxVars, batches, manifest, rManifest>>
 
 AckReadManifest(r) ==
-    /\ rState[r] \in {READ_ENTRY, RETRY_ACK}
-    /\ rCursor[r].nextSeq - rCursor[r].ackSeq > 1
+    /\ rState[r] = START_ACK
     /\ \/ /\ manifest.epoch > rManifest[r].epoch
           /\ rState' = [rState EXCEPT ![r] = PREEMPTED]
           /\ UNCHANGED rManifest
@@ -155,14 +193,13 @@ AckCommit(r) ==
            ackSeq      == rCursor[r].nextSeq - 1
        IN
             \/ /\ manifest.version /= rManifest[r].version
-               /\ rState' = [rState EXCEPT ![r] = RETRY_ACK]
-               /\ UNCHANGED <<manifest, rManifest, rCursor>>
+               /\ rState' = [rState EXCEPT ![r] = START_ACK]
+               /\ UNCHANGED <<manifest, rManifest>>
             \/ /\ manifest.version = rManifest[r].version
                /\ manifest' = newManifest
                /\ rManifest' = [rManifest EXCEPT ![r] = newManifest]
-               /\ rCursor' = [rCursor EXCEPT ![r].ackSeq = ackSeq]
                /\ rState' = [rState EXCEPT ![r] = READ_ENTRY]
-    /\ UNCHANGED <<writerVars, auxVars, batches, cursor>>
+    /\ UNCHANGED <<writerVars, auxVars, batches, cursor, rCursor>>
 
 ManifestHasMoreEntries(m, nseq) ==
     \E seq \in DOMAIN m.entries : seq >= nseq
@@ -170,7 +207,7 @@ ManifestHasMoreEntries(m, nseq) ==
 RefreshManifest(r) ==
     /\ rState[r] = READ_ENTRY
     /\ ~ManifestHasMoreEntries(rManifest[r], rCursor[r].nextSeq)
-    /\ ManifestHasMoreEntries(manifest, rCursor[r].nextSeq)
+    /\ manifest /= rManifest[r]
     /\ \/ /\ manifest.epoch > rManifest[r].epoch
           /\ rState' = [rState EXCEPT ![r] = PREEMPTED]
           /\ UNCHANGED rManifest
@@ -196,7 +233,7 @@ LocalManifestOK(lManifest) ==
     \/ ManifestOK(lManifest)
     
 CursorType ==
-    [nextSeq: NextSeqNos, ackSeq: WritableSeqNos \union {0}, version: Nat]
+    [nextSeq: NextSeqNos, version: Nat]
 
 TypeOK ==
     /\ \A id \in DOMAIN batches : batches[id] \in Values
@@ -205,8 +242,8 @@ TypeOK ==
     /\ wState \in [Writers -> {IDLE, READ_MANIFEST, APPEND_TO_MANIFEST}]
     /\ wPendingBatch \in [Writers -> Ids \union {NIL}]
     /\ \A w \in Writers : LocalManifestOK(wManifest[w])
-    /\ rState \in [Readers -> {IDLE, INCREMENT_EPOCH, READ_ENTRY,
-                               RETRY_ACK, PREFIX_TRIM, COMMIT, PREEMPTED}]
+    /\ rState \in [Readers -> {IDLE, INCREMENT_EPOCH, READ_CURSOR, CLAIM_CURSOR,
+                               READ_ENTRY, START_ACK, PREFIX_TRIM, COMMIT, PREEMPTED}]
     /\ rCursor \in [Readers -> CursorType]
     /\ \A r \in Readers : LocalManifestOK(rManifest[r])
     /\ auxUsedValues \in SUBSET Values
@@ -217,6 +254,11 @@ TypeOK ==
 \***********************************************************************
 \* INVARIANTS
 \***********************************************************************
+
+ValidReaders ==
+    /\ \A r \in Readers : rState[r] /= INVALID_STATE
+    /\ \E r \in Readers : rState[r] /= PREEMPTED
+        
 
 \* INV: ReadValuesPrefixOfWrittenValues
 \* Reading a value requires every earlier-written value
@@ -229,8 +271,7 @@ ReadValuesCompatibleWithWrittenValues ==
             \* Every written value that was written beforehand, has also been read
             /\ \A earlierWritePos \in 1..writePos :
                 \E earlierReadPos \in 1..readPos :
-                    auxReadValues[earlierReadPos] =
-                        auxWrittenValues[earlierWritePos]
+                    auxReadValues[earlierReadPos] = auxWrittenValues[earlierWritePos]
         
 
 \* INV: ReadValuesPrefixOfWrittenValues
@@ -272,18 +313,27 @@ ReadValuesOrderingCompatibleWithWrittenValues ==
                        \/ currWritePos <= prevWritePos
 
 \***********************************************************************
+\* LIVENESS
+\***********************************************************************
+
+ReaderReachesTailOrPreempts ==
+    \A r \in Readers :
+        []<>(\/ rCursor[r].nextSeq = Cardinality(Values) + 1
+             \/ rState[r] \in {IDLE, PREEMPTED})
+
+\***********************************************************************
 \* INIT, NEXT and SPEC
 \***********************************************************************
 
 Init ==
     /\ batches = <<>>
     /\ manifest = [entries |-> <<>>, nextSeq |-> 1, epoch |-> 0, version |-> 0]
-    /\ cursor = [nextSeq |-> 1, ackSeq |-> 0, version |-> 0]
+    /\ cursor = [nextSeq |-> 1, version |-> 0]
     /\ wState = [w \in Writers |-> IDLE]
     /\ wPendingBatch = [w \in Writers |-> NIL]
     /\ wManifest = [w \in Writers |-> NIL]
     /\ rState = [r \in Readers |-> IDLE]
-    /\ rCursor = [r \in Readers |-> [nextSeq |-> 1, ackSeq |-> 0, version |-> 0]]
+    /\ rCursor = [r \in Readers |-> [nextSeq |-> 1, version |-> 0]]
     /\ rManifest = [r \in Readers |-> NIL]
     /\ auxUsedValues = {}
     /\ auxUsedIds = {}
@@ -296,15 +346,36 @@ Next ==
         \/ ReadManifest(w)
         \/ AppendToManifest(w)
     \/ \E r \in Readers :
+        \* Initialize
         \/ ReaderInitialize(r)
         \/ IncrementManifestEpoch(r)
+        \/ ClaimCursor(r)
+        \* Tailing
         \/ \E id \in Ids : ReadEntry(r, id)
-        \/ SaveCursor(r)
         \/ RefreshManifest(r)
+        \* Ack
+        \/ AckPersistCursor(r)
         \/ AckReadManifest(r)
         \/ AckPrefixTrim(r)
         \/ AckCommit(r)
 
+Fairness ==
+    /\ \A w \in Writers :
+         /\ \A v \in Values : WF_vars(WriteBatch(w, v))
+        /\ WF_vars(ReadManifest(w))
+        /\ WF_vars(AppendToManifest(w))
+    /\ \A r \in Readers :
+        /\ WF_vars(ReaderInitialize(r))
+        /\ WF_vars(IncrementManifestEpoch(r))
+        /\ WF_vars(ClaimCursor(r))
+        /\ \A id \in Ids : WF_vars(ReadEntry(r, id))
+        /\ WF_vars(AckPersistCursor(r))
+        /\ WF_vars(RefreshManifest(r))
+        /\ WF_vars(AckReadManifest(r))
+        /\ WF_vars(AckPrefixTrim(r))
+        /\ WF_vars(AckCommit(r))
+
 Spec == Init /\ [][Next]_vars
+LivenessSpec == Init /\ [][Next]_vars /\ Fairness
 
 ========================================================================
