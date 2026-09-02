@@ -1,10 +1,18 @@
 # Buffer modified to be a single-writer WAL
 
-Turns out that the manifest epoch is not required, just the manifest version as only one role type needs to modify the file. GC can read it but doesn't need to write it.
+Two types of process:
+* Writer (which writes to the WAL and maintains WAL-derived state)
+* Garbage Collector, which can read the manifest but never updates it
+
+Because only writers can modify the manifest and we only want one active writer, the manifest epoch is not required, just the manifest version.
+
+Buffer relies on batch objects ids being ULIDs, for the GC algorithm to work. This spec simply models them as monotonic integers.
+
+A writer must first initialize, where it tries to claim the manifest by bumping its version (fencing other existing writers), then loads the latest snapshot and replays the manifest entries until it is up to date. Then it transitions to READY and starts appending entries and writing snapshots.
 
 ## State progress and liveness
 
-The spec has two terminal states for each writer: READY (for writes) and PREEMPTED (after a write conflict). During the initialization phase, any conflict will cause the writer to restart. After initialization (once it has reached READY), any conflict will cause it to transition to PREEMPTED, where it will stay forever. So, writers can battle it out for control, but once an established writer has lost control, it stops. This allows us to model competing writers and keep liveness checks simple.
+The spec has two terminal states for each writer: READY (for writes) and PREEMPTED (after a write conflict). During the initialization phase, any conflict will cause the writer to restart where it can try to initialize again. After initialization (once it has reached READY), any conflict will cause it to transition to PREEMPTED, where it will stay forever. So, writers can battle it out for control, but once an established writer has lost control, it stops. This allows us to model competing writers and keep liveness checks simple.
 
 ## Transitions
 
