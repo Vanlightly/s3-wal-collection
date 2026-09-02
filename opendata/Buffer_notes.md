@@ -4,9 +4,33 @@ https://github.com/opendata-oss/opendata/blob/main/buffer/rfcs/0001-stateless-bu
 
 It's a multi-writer, single consumer queue, but if you squint, you can think of the dequeue as log GC also.
 
+Buffer relies on batch objects ids being ULIDs, for the GC algorithm to work. This spec simply models them as monotonic integers.
+
 ## Reader Preemption
 
-This spec does not model restarts of a fully initialized reader once another reader has superseded it. If a reader experiences a conflict during initialization, it restarts the initialization process. If it experiences a conflict post initialization, it transitions to PREEMPTED where it remains. Restarting established readers only makes liveness harder. Just add more readers for more reader concurrency.
+The spec has two terminal states for each reader: READ_ENTRY (ready for more reads) and PREEMPTED (after a write conflict on acking). During the initialization phase, any conflict will cause the reader to restart where it can try to initialize again. After initialization (once it has reached READ_ENTRY), any conflict will cause it to transition to PREEMPTED, where it will stay forever. So, readers can battle it out for control, but once an established reader has lost control, it stops. This allows us to model competing readers and keep liveness checks simple.
+
+## GC Correctness
+
+Buffer uses a GC algorithm based on ULID, unique identifiers with a timestamp prefix. A GC process reads the manifest and deletes any batch object that meets these criteria:
+
+1. It is not referenced in the current manifest snapshot.
+2. Its ULID timestamp is older than the oldest manifest entry's ULID timestamp. This prevents deleting a file that a producer has written to object storage but has not yet enqueued in the manifest.
+3. Its ULID timestamp is older than the configured grace period relative to the current wall-clock time.
+
+The grace period here is the trick to make this work. The TLA+ specification does not model time and so no grace period, therefore GC is unsafe as it can delete a valid batch file. See:
+
+1. w1 writes object ts1->A
+2. w2 writes object ts2->B
+3. w2 reads manifest
+4. w2 enqueues object ts2 in the manifest
+5. GC reads manifest (sees floor is ts2)
+6. w1 reads manifest
+7. w1 enqueues object ts1 in the manifest
+8. GC lists objects ts=1, ts=2
+9. GC deletes object ts1 (deleting a batch from the current manifest)
+
+For this reason, there is a constant EnableGC, which when enabled, causes a safety property violation.
 
 ## Cursor management
 
@@ -59,7 +83,7 @@ Not sure how to do cursor management without some kind of conditional write. Cou
        |                              |
        |                 +------------+------------+
        |                 |                         |
-       |          write conflict                succeeds
+       |         (write conflict)               (succeeds)
        |                 |                         |
        +-----------------+                         v
        |                                      [CLAIM_CURSOR]
