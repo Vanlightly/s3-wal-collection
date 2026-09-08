@@ -31,6 +31,7 @@ Single-writer WALs:
     * Implementations: https://github.com/rockwotj/chorus though its single-writer I believe.
 * [BufferAsWAL](opendata/BufferAsWAL.tla)
     * I modified the Buffer design to make it work as a single-writer WAL
+* [SlateDB WAL protocol](slatedb/SlateDBWAL.tla)
 
 Multi-writer WALs:
 
@@ -51,7 +52,6 @@ Not quite a WAL:
 
 The following are a set of projects that must be evaluated to see if they qualify and if they do, write the spec for them, and add them to the final analysis. More needed, feel free to suggest!
 
-* SlateDB WAL https://github.com/slatedb/slatedb/blob/main/specs/fizzbee/WalProtocol.fizz, https://www.bitsxpages.com/p/protocols-for-transactional-usage
 * S2.dev
 * Robert Pitt's git3: https://github.com/robertpitt/git3
 * Cursor's new WAL thing (Continuity). Enough info for a TLA+ spec?
