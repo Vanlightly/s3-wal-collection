@@ -53,10 +53,15 @@ Not quite a WAL:
 
 The following are a set of projects that must be evaluated to see if they qualify and if they do, write the spec for them, and add them to the final analysis. More needed, feel free to suggest!
 
-* S2.dev
 * Robert Pitt's git3: https://github.com/robertpitt/git3
 * Cursor's new WAL thing (Continuity). Enough info for a TLA+ spec?
 * OpenData Log
 * UnisonDB WAL: https://github.com/ankur-anand/unisondb/tree/main/pkg/walfs
 * Shared Storage Consensus: https://github.com/io-s2c/s2c
 * objwal https://github.com/JayJamieson/objwal
+
+## Designs not included
+
+* BtrLog (not just S3)
+* S2.dev (closed source)
+* S2 Lite (defers mostly to SlateDB so not interesting)
