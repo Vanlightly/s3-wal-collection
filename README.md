@@ -26,15 +26,16 @@ So far.
 
 Single-writer WALs:
 
-* [OSWALD](oswald/)
-    * Source: https://nvartolomei.com/oswald, https://github.com/nvartolomei/oswald/tree/main/p
-    * Implementations: https://github.com/rockwotj/chorus though its single-writer I believe.
+* [SlateDB WAL protocol](slatedb/SlateDBWAL.tla)
+* [SlateDB WAL protocol CAS variant](slatedb/SlateDBWAL_CAS.tla)
 * [BufferAsWAL](opendata/BufferAsWAL.tla)
     * I modified the Buffer design to make it work as a single-writer WAL
-* [SlateDB WAL protocol](slatedb/SlateDBWAL.tla)
 
 Multi-writer WALs:
 
+* [OSWALD](oswald/)
+    * Source: https://nvartolomei.com/oswald, https://github.com/nvartolomei/oswald/tree/main/p
+    * Implementations: https://github.com/rockwotj/chorus though its single-writer I believe.
 * Conflux (Virtual Consensus, LogDrive)
     * Absractions over cloud storage, including S3. S3 the whole source of truth.
     * Soft-state optimizations
