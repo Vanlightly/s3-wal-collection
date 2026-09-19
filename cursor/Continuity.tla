@@ -1,5 +1,19 @@
 ----------------------------- MODULE Continuity -------------------------
 
+(*
+    This spec is a best-effort attempt to turn the blog post
+    https://cursor.com/blog/git-at-any-scale into a TLA+ 
+    specification. It makes some reasonable decisions where
+    the blog post is light or missing details and simplifies
+    compaction down to a snapshotting process (also to 
+    harmonize this spec with the other specs in this repo).
+    The spec does not attempt to model git in any way. Instead,
+    like the other specs, it models a sequence of values
+    (akin to a sequence f packfiles) which are appended to 
+    the log, and state machine state which is each replicas
+    view of the value sequence (the git repo state). 
+*)
+
 EXTENDS Naturals, Integers, FiniteSets, FiniteSetsExt, Sequences, TLC
 
 CONSTANTS Replicas, \* The set of replica processes
@@ -186,8 +200,9 @@ WritePackFile(r, v) ==
     ACTION: GetWalIndex
     A replica just wrote a packfile and now refreshes the
     WAL index. If the local repo is behind the WAL then
-    the replica transitions to REPLAY_WAL_INDEX, else
-    it transitions to APPEND_WAL_INDEX.
+    the replica transitions to REPLAY_WAL_INDEX (the refetch
+    and rebase described in the blog post), else it 
+    transitions to APPEND_WAL_INDEX.
 -----------------------------------------------------------*)
 GetWalIndex(r) ==
     /\ rState[r] = GET_WAL_INDEX
@@ -205,10 +220,12 @@ GetWalIndex(r) ==
     S3 (based on the version aka etag).
     If the condition fails it's a write conflict so the 
     writer transitions back to GET_WAL_INDEX so it
-    can try again with a non-stale index.
-    If the write succeeded, the replica applies the packfile
-    to its local repo. The replica transitions back to
-    READY.
+    can try again with a non-stale index. In git terms,
+    this is the refetch and rebase described in the
+    blog post before retrying.
+    If the write succeeded, the replica applies the 
+    packfile to its local repo. The replica transitions
+    back to READY.
 -----------------------------------------------------------*)
 
 AppendToWalIndex(r) ==
