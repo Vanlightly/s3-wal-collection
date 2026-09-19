@@ -36,6 +36,8 @@ Multi-writer WALs:
 * [OSWALD](oswald/)
     * Source: https://nvartolomei.com/oswald, https://github.com/nvartolomei/oswald/tree/main/p
     * Implementations: https://github.com/rockwotj/chorus though its single-writer I believe.
+* Cursor's [Continuity](cursor/Continuity.tla)
+    * Source: https://cursor.com/blog/git-at-any-scale
 * Conflux (Virtual Consensus, LogDrive)
     * Absractions over cloud storage, including S3. S3 the whole source of truth.
     * Soft-state optimizations
@@ -54,11 +56,11 @@ Not quite a WAL:
 The following are a set of projects that must be evaluated to see if they qualify and if they do, write the spec for them, and add them to the final analysis. More needed, feel free to suggest!
 
 * Robert Pitt's git3: https://github.com/robertpitt/git3
-* Cursor's new WAL thing (Continuity). Enough info for a TLA+ spec?
 * OpenData Log
 * UnisonDB WAL: https://github.com/ankur-anand/unisondb/tree/main/pkg/walfs
 * Shared Storage Consensus: https://github.com/io-s2c/s2c
 * objwal https://github.com/JayJamieson/objwal
+* wal3 chroma https://www.trychroma.com/engineering/wal3
 
 ## Designs not included
 
