@@ -76,13 +76,19 @@ ResetToReady(r) ==
 
 (* ---------------------------------------------------------
     ACTION: StartReplica
-    A replica starts by reading the current WAL index
+    A replica starts by reading the current WAL index.
+    If the replica is caught up it transitions to READY
+    where it can start serving reads and writes, else
+    it transitions to REPLAY_WAL_INDEX to catch up.
 -----------------------------------------------------------*)
 
 StartReplica(r) ==
     /\ rState[r] = IDLE
     /\ RefreshWalIndex(r)
-    /\ ResetToReady(r)
+    /\ IF IsCaughtUp(r, walIndex)
+       THEN ResetToReady(r)
+       ELSE /\ rState' = [rState EXCEPT ![r] = REPLAY_WAL_INDEX]
+            /\ rAction' = [rAction EXCEPT ![r] = REPLICATE]
     /\ UNCHANGED <<storeVars, rPendingPackFile, 
                    rRepo, gcVars, auxVars>>
 
@@ -198,7 +204,7 @@ GetWalIndex(r) ==
     WAL index and performs a CAS write to the WAL index on
     S3 (based on the version aka etag).
     If the condition fails it's a write conflict so the 
-    writer transitions back to REFRESH_WAL_INDEX so it
+    writer transitions back to GET_WAL_INDEX so it
     can try again with a non-stale index.
     If the write succeeded, the replica applies the packfile
     to its local repo. The replica transitions back to
@@ -567,7 +573,7 @@ Fairness ==
         /\ WF_vars(ReplayWalIndex(r))
         /\ WF_vars(ValidateNotFound(r))
         /\ \A v \in Values : SF_vars(WritePackFile(r, v))
-        /\ WF_vars(RefreshWalIndex(r))
+        /\ WF_vars(GetWalIndex(r))
         /\ WF_vars(AppendToWalIndex(r))
         /\ WF_vars(ServeRead(r))
         /\ WF_vars(CommitSnapshot(r))
