@@ -8,7 +8,10 @@
     The spec itself discards all git-related parts, and focuses on
     the basic WAL mechanics. It simplifies writes by embedding
     write values into log segments, rather than writing separate
-    data files which are referenced from log segments.
+    data files which are referenced from log segments. It also does
+    not model the nuances of ambiguous CAS write failures (those
+    which are not condition failed results), which add a lot of
+    additional complexity.
 
     Walgit has not implemented full GC so this spec also does not
     cover GC of old log segments.
@@ -67,6 +70,10 @@ replicaVars == <<rOperation, rState, rManifest, rMachineData,
                  rPendingCp, rCandidateSeq, rBurned>>
 auxVars == <<auxUsedValues, auxAttemptKey, auxCommitted>>
 vars == <<storeVars, replicaVars, auxVars>>
+
+Symmetry ==
+    Permutations(Replicas)
+        \union Permutations(Values)
 
 \***************************************************************************
 \* Helpers
@@ -169,19 +176,17 @@ LoadCheckpoint(r) ==
 (* SUB-ACTION ReplayNextSegment -------------------------- *)
 ShouldLoadNextSegment(r) ==
     \* There is a segment whose seq range is above the applied seq
-    \E s \in DOMAIN rManifest[r].logSegments : 
-        rManifest[r].logSegments[s].lastSeq > rAppliedSeq[r]
+    \E segRef \in rManifest[r].logSegments : 
+        segRef.lastSeq > rAppliedSeq[r]
 
 NextSegmentRef(r) ==
     \* choose the segment with the lowest seq range that 
     \* is above the applied seq
-    LET segRefs == rManifest[r].logSegments
-        next == CHOOSE s \in DOMAIN segRefs :
-                    /\ segRefs[s].lastSeq > rAppliedSeq[r]
-                    /\ ~\E s0 \in DOMAIN segRefs :
-                        /\ segRefs[s0].lastSeq > rAppliedSeq[r]
-                        /\ s0 < s
-    IN segRefs[next]
+    CHOOSE segRef \in rManifest[r].logSegments :
+                /\ segRef.lastSeq > rAppliedSeq[r]
+                /\ ~\E segRef0 \in rManifest[r].logSegments :
+                    /\ segRef0.lastSeq > rAppliedSeq[r]
+                    /\ segRef0.lastSeq < segRef.lastSeq
 
 ReplayNextSegment(r) ==
     LET segRef  == NextSegmentRef(r) 
@@ -386,13 +391,18 @@ CheckSlot(r) ==
     (invalidating this replica's log segment), or it could 
     have been a manifest version bump due to a checkpoint 
     (which does not invalidate the written log segment).
+
+    NOTE: In case 1, it diverges from Walgit in that it only
+    checks if the WAL has advanced beyond the applied seq.
+    Walgit bases this on the candidate seq, which leads to
+    a safety violation (with this spec anyway).
 -----------------------------------------------------------*)
 
 CasManifest(r) ==
     /\ rState[r] = CAS_MANIFEST
     /\ LET segRef    == rPendingSegment[r].ref
            successor == [rManifest[r] EXCEPT !.headSeq     = segRef.lastSeq,
-                                             !.logSegments = Append(@, segRef),
+                                             !.logSegments = @ \union {segRef},
                                              !.version     = @ + 1]
            committed == rPendingSegment[r].segment.entries
        IN
@@ -410,7 +420,8 @@ CasManifest(r) ==
                               rPendingValue, rPendingSegment>>
             \* CASE 2 - Write conflict! But no log segments have been committed
             \*          by other replicas, so refresh the manifest and remain
-            \*          in CAS_MANIFEST for another try.
+            \*          in CAS_MANIFEST for another try. This is an optimization
+            \*          I have added (not in Walgit).
             \/ /\ rManifest[r].version /= manifest.version
                /\ rAppliedSeq[r] = manifest.headSeq
                /\ RefreshManifest(r)
@@ -450,13 +461,19 @@ CasManifest(r) ==
 
 DeleteOwnLogSegment(r) ==
     /\ rState[r] = DELETE_OWN_SEGMENT
-    /\ logSegments' = RemoveKey(logSegments, rPendingSegment[r].ref.id)
-    /\ rPendingSegment' = [rPendingSegment EXCEPT ![r] = None]
-    /\ rCandidateSeq' = [rCandidateSeq EXCEPT ![r] = rManifest[r].headSeq + 1]
-    /\ rState' = [rState EXCEPT ![r] = REPLAY_WAL]
-    /\ rBurned' = [rBurned EXCEPT ![r] = <<>>]
-    /\ UNCHANGED <<manifest, checkpoints, auxVars, rOperation, rManifest,
-                   rAppliedSeq, rPendingValue, rMachineData, rPendingCp>>
+    /\ LET id     == rPendingSegment[r].ref.id
+           attemptKey == rPendingSegment[r].segment.attemptKey
+       IN
+        /\ logSegments' = IF /\ id \in DOMAIN logSegments
+                             /\ logSegments[id].attemptKey = attemptKey
+                          THEN RemoveKey(logSegments, id)
+                          ELSE logSegments
+        /\ rPendingSegment' = [rPendingSegment EXCEPT ![r] = None]
+        /\ rCandidateSeq' = [rCandidateSeq EXCEPT ![r] = rManifest[r].headSeq + 1]
+        /\ rState' = [rState EXCEPT ![r] = REPLAY_WAL]
+        /\ rBurned' = [rBurned EXCEPT ![r] = <<>>]
+        /\ UNCHANGED <<manifest, checkpoints, auxVars, rOperation, rManifest,
+                    rAppliedSeq, rPendingValue, rMachineData, rPendingCp>>
 
 (* ---------------------------------------------------------
     ACTION: DeleteOneBurnedLogSegment
@@ -487,40 +504,60 @@ DeleteOneBurnedLogSegment(r) ==
                    rPendingSegment, rPendingCp>>
 
 \***************************************************************************
-\* Snapshot actions
+\* Checkpoint actions (aka snapshots)
 \***************************************************************************
 
 (* ---------------------------------------------------------
     ACTION: WriteCheckpoint
 
-    A caught-up replica has something to checkpoint.
-    It writes a checkpoint file (which contains its local
-    machine data) with a unique id (composed of the 
-    checkpoint seq and a unique key). Then it transitions
-    to COMMIT_CHECKPOINT.
+    A replica checks it's manifest is up to date and if
+    so, chooses a committed seq at which to create a 
+    checkpoint, such that the checkpoint is ahead of
+    the current checkpoint referenced in the manifest.
+
+    In Walgit, it checkpoints the head, but after a
+    CAS conflict, it retries the same checkpoint, which
+    can now be behind head. In this spec, it doesn't
+    retry in case of a conflict but allows a seq <
+    the head, which covers a similar scenario.
+
+    The replica writes a checkpoint file (which contains
+    its local machine data up to the chosen seq) with a 
+    unique id (composed of the checkpoint seq and a unique
+     key). Then it transitions to COMMIT_CHECKPOINT.
 -----------------------------------------------------------*)
+
+ValidCheckpointSeq(r, seq) ==
+    \* The checkpoint aligns with a log segment (makes
+    \* replay simpler in the spec).
+    /\ \E segRef \in rManifest[r].logSegments :
+            segRef.lastSeq = seq
+    /\ \* Either, no checkpoint has ever been written and
+       \* this seq represents data to checkpoint
+       \/ rManifest[r].checkpoint = None /\ seq > 0
+       \* Or there is a previous checkpoint, and the seq
+       \* to checkpoint is beyond the last checkpoint.
+       \/ /\ rManifest[r].checkpoint /= None
+          /\ seq > rManifest[r].checkpoint.seq
+
+CheckpointEntries(r, upperSeq) ==
+    LET cpSeqs == { seq \in DOMAIN rMachineData[r] : seq <= upperSeq }
+    IN [seq \in cpSeqs |-> rMachineData[r][seq]]  
 
 WriteCheckpoint(r) ==
     /\ rState[r] = READY
     /\ rManifest[r].version = manifest.version
-    /\ IsCaughtUp(r, rManifest[r])
-    /\ \* Either, no checkpoint has ever been written and
-       \* there is data to checkpoint
-       \/ /\ rManifest[r].checkpoint = None
-          /\ rAppliedSeq[r] > 0
-       \* Or there is a previous checkpoint, and the applied
-       \* seq has advanced beyond it.
-       \/ /\ rManifest[r].checkpoint /= None
-          /\ rAppliedSeq[r] > rManifest[r].checkpoint.seq
-    /\ LET cpId  == [seq |-> rAppliedSeq[r], attemptKey |-> auxAttemptKey]
-           cpRef == [id |-> cpId, seq |-> rAppliedSeq[r]]   
-           cp    == [seq     |-> rAppliedSeq[r],
-                     entries |-> rMachineData[r]]
-       IN /\ checkpoints' = checkpoints @@ (cpId :> cp)
-          /\ rPendingCp' = [rPendingCp EXCEPT ![r] = cpRef]
-          /\ rState' = [rState EXCEPT ![r] = COMMIT_CHECKPOINT]
-          /\ rOperation' = [rOperation EXCEPT ![r] = CHECKPOINT]
-          /\ auxAttemptKey' = auxAttemptKey + 1
+    /\ \E seq \in DOMAIN rMachineData[r] :
+        /\ ValidCheckpointSeq(r, seq)
+        /\ LET cpId  == [seq |-> seq, attemptKey |-> auxAttemptKey]
+               cpRef == [id |-> cpId, seq |-> seq]   
+               cp    == [seq     |-> seq,
+                         entries |-> CheckpointEntries(r, seq)]
+           IN /\ checkpoints' = checkpoints @@ (cpId :> cp)
+              /\ rPendingCp' = [rPendingCp EXCEPT ![r] = cpRef]
+              /\ rState' = [rState EXCEPT ![r] = COMMIT_CHECKPOINT]
+              /\ rOperation' = [rOperation EXCEPT ![r] = CHECKPOINT]
+              /\ auxAttemptKey' = auxAttemptKey + 1
     /\ UNCHANGED <<manifest, logSegments, auxUsedValues, auxCommitted,
                    rAppliedSeq, rBurned, rCandidateSeq, rManifest,
                    rPendingSegment, rPendingValue, rMachineData>>
@@ -536,10 +573,16 @@ WriteCheckpoint(r) ==
     checkpoint again (if the latest checkpoint is behind).
 -----------------------------------------------------------*)
 
+TrimmedSegments(r) ==
+    { segRef \in rManifest[r].logSegments :
+            segRef.firstSeq > rPendingCp[r].seq }
+
 CommitCheckpoint(r) ==
     /\ rState[r] = COMMIT_CHECKPOINT
-    /\ LET successor == [rManifest[r] EXCEPT !.checkpoint = rPendingCp[r],
-                                             !.version = @ + 1]
+    /\ LET segments == TrimmedSegments(r) 
+           successor == [rManifest[r] EXCEPT !.logSegments = segments,
+                                             !.checkpoint  = rPendingCp[r],
+                                             !.version     = @ + 1]
        IN
            /\ IF rManifest[r].version = manifest.version
               THEN /\ manifest' = successor
@@ -584,7 +627,7 @@ CheckpointRefType == [id: CheckpointIdType, seq: Nat]
 LogSegmentRefType == [id: Nat, firstSeq: Nat, lastSeq: Nat]
 
 ManifestType == [headSeq: Nat, 
-                 logSegments: Seq(LogSegmentRefType),
+                 logSegments: SUBSET LogSegmentRefType,
                  checkpoint: CheckpointRefType \union {None},
                  version: Nat]
 
@@ -618,7 +661,8 @@ TypeOK ==
     /\ \A r \in Replicas: ValidEntriesType(rMachineData[r])
     /\ rAppliedSeq \in [Replicas -> Nat]
     /\ rPendingValue \in [Replicas -> Seq(Values) \union {None}]
-    /\ \A r \in Replicas : ValidPendingSegment(rPendingSegment[r]) 
+    /\ \A r \in Replicas : ValidPendingSegment(rPendingSegment[r])
+    /\ rPendingCp \in [Replicas -> CheckpointRefType \union {None}]
     /\ rCandidateSeq \in [Replicas -> Nat]
     /\ rBurned \in [Replicas -> Seq(BurnedType)]
     /\ auxUsedValues \in SUBSET Values
@@ -636,13 +680,39 @@ ValidReplicas ==
         /\ rState[r] /= ILLEGAL_STATE
         /\ rState[r] = READY => rOperation[r] = READY
 
+(* INV: ValidManifest *)
+ValidManifest ==
+    \* There can be no seq overlap between segments
+    /\ ~\E s1, s2 \in manifest.logSegments :
+        /\ s1.id /= s2.id
+        /\ s1.firstSeq < s2.firstSeq
+        /\ s1.lastSeq >= s2.firstSeq
+    \* One segment must represent the headSeq
+    /\ \E s \in manifest.logSegments :
+        s.lastSeq = manifest.headSeq
+    \* There can be no segments whose range is above the headSeq
+    /\ ~\E s \in manifest.logSegments :
+        s.firstSeq > manifest.headSeq
+    \* The headSeq represents the highest committed seq
+    /\ manifest.headSeq = MaxOrDef(DOMAIN auxCommitted, 0)        
+
+(* INV: ValidLogSegments 
+   The bounds of each log segment matches the 
+   bounds of its seg ref.
+*)
+ValidLogSegments ==
+    \A segRef \in manifest.logSegments :
+        LET s == ReadLogSegment(segRef.id) IN 
+            /\ segRef.firstSeq = Min(DOMAIN s.entries)
+            /\ segRef.lastSeq = Max(DOMAIN s.entries)
+
 (* INV: ReplicaStateIsCommittedPrefix
    The machine data of every replica is a valid prefix
    of the recorded committed sequence of entries.
 *)
 
 IsPrefixOfComitted(mState, appliedSeq) ==
-    /\ Cardinality(DOMAIN mState) <= Cardinality(DOMAIN auxCommitted)
+    /\ DOMAIN mState \subseteq DOMAIN auxCommitted
     /\ \A seq \in DOMAIN mState : 
         mState[seq] = auxCommitted[seq]
     /\ \A seq \in DOMAIN auxCommitted : 
@@ -665,19 +735,25 @@ ManifestRepresentsCommittedState ==
     LET cpSeq == IF manifest.checkpoint = None THEN 0 
                  ELSE manifest.checkpoint.seq 
         cp    == checkpoints[manifest.checkpoint.id]
-        hist  == auxCommitted
     IN
-        \A seq \in DOMAIN hist :
+        /\ \A seq \in DOMAIN auxCommitted :
+            \* If the seq is covered by the checkpoint then...
             /\ seq <= cpSeq => 
+                    \* The seq must exist in the checkpoint
                     /\ seq \in DOMAIN cp.entries
-                    /\ cp.entries[seq] = hist[seq]
+                    \* The checkpoint contents should match recorded history
+                    /\ cp.entries[seq] = auxCommitted[seq]
+                    \* There cannot be entries in the checkpoint beyond the checkpoint seq
+                    /\ Max(DOMAIN cp.entries) = cpSeq
+            \* If the seq is not covered by the checkpoint then...
             /\ seq > cpSeq => 
-                    \E i \in DOMAIN manifest.logSegments :
-                        LET s == manifest.logSegments[i] IN
-                            /\ seq >= s.firstSeq
-                            /\ seq <= s.lastSeq
-                            /\ seq \in DOMAIN ReadLogSegment(s.id).entries
-                            /\ ReadLogSegment(s.id).entries[seq] = hist[seq]
+                    \* there must be a log segment that covers the seq
+                    \* and the log segment contents must match recorded history
+                    \E segRef \in manifest.logSegments :
+                        /\ seq >= segRef.firstSeq
+                        /\ seq <= segRef.lastSeq
+                        /\ seq \in (DOMAIN ReadLogSegment(segRef.id).entries)
+                        /\ ReadLogSegment(segRef.id).entries[seq] = auxCommitted[seq]
 
 (* INV: ConsistentReads
    Every possible served read is consistent with the
@@ -710,7 +786,7 @@ Init ==
     /\ logSegments = <<>>
     /\ checkpoints = <<>>
     /\ manifest = [headSeq     |-> 0, 
-                   logSegments |-> <<>>,
+                   logSegments |-> {},
                    checkpoint  |-> None,
                    version     |-> 1]
     /\ rOperation = [r \in Replicas |-> IDLE]
