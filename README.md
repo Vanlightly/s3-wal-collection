@@ -17,7 +17,7 @@ Each design will get a TLA+ specification and eventually added to a classificati
 Three main categories:
 
 1. Single-writer WAL (with writer fencing)
-2. Multi-writer WAL (for multi-master systems)
+2. Multi-writer WAL (for multi-master or decentralized systems)
 3. Not quite a WAL but a log all the same.
 
 ## Verified designs
@@ -45,6 +45,8 @@ Multi-writer WALs:
     * Source: https://www.usenix.org/system/files/osdi20-balakrishnan.pdf and https://www.usenix.org/system/files/osdi26-vickers.pdf
     * TLA+ here -> https://github.com/Vanlightly/log-drive-specs/blob/main/tlaplus/AtomicLog.tla 
     *  Some writing: https://jack-vanlightly.com/blog/2026/8/25/the-logdrive-flexible-composition-through-abstraction-in-shared-logs
+* [Walgit](/walgit/Walgit.tla)
+    * Source: https://github.com/tobi/walgit/tree/main
 
 Not quite a WAL:
 
