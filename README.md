@@ -6,6 +6,7 @@ Selection criteria:
 
 1. Source of truth only on S3
 2. Simple soft-state optimizations allowed
+3. Open: either OSS code, a journal article or sufficiently detailed blog post
 
 Exclusion criteria (for now):
 
@@ -24,14 +25,16 @@ Three main categories:
 
 So far.
 
-Single-writer WALs:
+### Category 1: Single-writer WALs
 
 * [SlateDB WAL protocol](slatedb/SlateDBWAL.tla)
 * [SlateDB WAL protocol CAS variant](slatedb/SlateDBWAL_CAS.tla)
 * [BufferAsWAL](opendata/BufferAsWAL.tla)
     * I modified the Buffer design to make it work as a single-writer WAL
+* [Objwal](/jay-jamieson-objwal/ObjWAL.tla)
+    * Source: https://github.com/JayJamieson/objwal
 
-Multi-writer WALs:
+### Category 2: Multi-writer WALs
 
 * [OSWALD](oswald/)
     * Source: https://nvartolomei.com/oswald, https://github.com/nvartolomei/oswald/tree/main/p
@@ -48,10 +51,9 @@ Multi-writer WALs:
 * [Walgit](/walgit/Walgit.tla)
     * Source: https://github.com/tobi/walgit/tree/main
 
-Not quite a WAL:
+### Category 3: Not quite a WAL but a log or log-like
 
 * OpenData [Buffer](opendata/Buffer.tla)
-
 
 ## Designs yet to model
 
@@ -61,11 +63,16 @@ The following are a set of projects that must be evaluated to see if they qualif
 * OpenData Log
 * UnisonDB WAL: https://github.com/ankur-anand/unisondb/tree/main/pkg/walfs
 * Shared Storage Consensus: https://github.com/io-s2c/s2c
-* objwal https://github.com/JayJamieson/objwal
 * wal3 chroma https://www.trychroma.com/engineering/wal3
+* https://lance.org/format/table/mem_wal/
+* https://github.com/rockwotj/chorus
+* https://github.com/ankur-anand/objlog
+* https://github.com/skipprd/skipprd-wal-p
 
-## Designs not included
+
+## Designs not included (due to selection criteria)
 
 * BtrLog (not just S3)
 * S2.dev (closed source)
 * S2 Lite (defers mostly to SlateDB so not interesting)
+* Warpstream, closed source and depends on a non-trivial metadata service
