@@ -17,7 +17,7 @@ The variant introduces two log record kinds:
 - `DATA` contains application values.
 - `FENCE` contains no application values and occupies a log index to block a stale write.
 
-When a new leader finishes recovery exactly one index behind `commitIndex`, it enters `[FENCE_FIRST_INDEX]`. Instead of reusing the outstanding reservation for its first application batch, `FenceFirstIndex` attempts to create:
+When a new leader finishes recovery exactly one index behind `commitIndex`, it enters `[FENCE_FIRST_INDEX]`. Instead of reusing the outstanding commitIndex for its first application batch, `FenceFirstIndex` attempts to create:
 
 ```text
 log[commitIndex] = [kind        |-> FENCE,
@@ -28,12 +28,12 @@ log[commitIndex] = [kind        |-> FENCE,
 
 The write uses put-if-absent, so it races with the old leader's pending data write:
 
-- **The fence wins:** the old leader's data write encounters an occupied address and fails. The new leader then validates its leadership before becoming ready.
+- **The fence wins:** the old leader's data write encounters an occupied address and fails. The old leader is forced to rejoin. The new leader proceeds to validate its leadership before finishing its join process to become "ready".
 - **The data write wins:** the fence write fails and the new leader returns to `[REFRESH]` to rejoin based on the fresh metadata. If it remains leader, it recovers the winning data batch before accepting new commands.
 
-If recovery already reaches the reservation boundary, no fence is needed for that reservation: the batch has been written and can be recovered.
+If recovery already reaches the commitIndex (reservation boundary), no fence is needed for that reservation: the batch has been written and can be recovered.
 
-A fence consumes an index but adds nothing to the application state or successful-write history. Replaying its empty `entries` advances the apply index without applying a command to the local machine data. Once the fence is validated, the new leader's first data batch reserves `commitIndex + 1` through the normal metadata CAS. The `rReuseFirstIndex` variable is completely omitted in this variant.
+A fence consumes an index but is not applied to the application state or successful-write history. Replaying its empty `entries` advances the apply index without applying any command to the local machine data. Once the fence is validated, the new leader's first data batch reserves `commitIndex + 1` as there is never reuse of the `commitIndex`. The `rReuseFirstIndex` variable is completely omitted in this variant.
 
 ## Validate after writing the fence
 

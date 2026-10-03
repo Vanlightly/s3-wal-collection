@@ -2,7 +2,7 @@
 
 This document accompanies [S2C.tla](./S2C.tla), a simplified specification of Shared Storage Consensus. It describes the protocol represented by this model, including its consistency violation when garbage collection is enabled. The fencing variant, [S2CFencing.tla](./S2CFencing.tla), will be covered separately.
 
-The specification focuses on leadership changes, durable batch writes, recovery, follower synchronization, snapshotting, and garbage collection. It omits implementation sequence numbers, heartbeats, and some liveness optimizations. The discussion below follows the executable actions where comments in the specification differ from them.
+The specification focuses on leadership changes, durable batch writes, recovery, follower synchronization, snapshotting, and garbage collection. It omits implementation sequence numbers, heartbeats, and some liveness optimizations.
 
 ## Replica model
 
@@ -16,6 +16,8 @@ Replicas take one of two roles:
 Followers are therefore not needed to make an individual batch durable. Successful log creation completes the modeled write without waiting for follower acknowledgments. Follower acknowledgments track replication progress.
 
 Each replica caches the shared leadership metadata in `rLeaderState`. `IsLeader(r)` checks whether this **local copy** names the replica as leader. It does not check the current metadata in object storage. Multiple replicas can consequently believe they are leader at the same time, with different cached epochs and versions.
+
+> Unless otherwise stated, "a leader" refers to a replica that believes it is the leader based on its local cached leaderState.
 
 ## Durable state in S3
 
@@ -85,76 +87,75 @@ Recovery combines the snapshot with log batches **strictly above** its `applyInd
 
 ### Join process
 
-When a replica starts, or after certain write conflicts or when a leader change is detected, a replica goes through the join process.
+When a replica starts, or after certain write conflicts or when a leader change is detected, a replica goes through the **join** process.
 
 The process starts by refreshing the cached leader state. If there is no leader state, then the replica tries to become the leader (and is the one that creates the leaderState object).
 If there is a leader, then it follows either the `JoinAsLeader` (if it believe IT is the leader, based on the cached leader state), or else `JoinAsFollower`.
 
 ```text
 [IDLE] or [REFRESH]
-         |
-  RefreshLeaderState -- no metadata --> [ATTEMPT_LEADERSHIP]
-         |                                      |
-  metadata exists                        AttemptLeadership
-         |                                 /         \
-         |                            (success)    (conflict)
-         |                                |             |
-         v                                |         [REFRESH]
-       [JOIN] <---------------------------+
-         |
-         +----> JoinAsLeader
-         |           |
-         |           +-- applyIndex < commitIndex --> [CATCHUP]
-         |           |                                joined = FALSE
-         |           |
-         |           +-- otherwise -----------------> [READY]
-         |                                            joined = TRUE
-         |
-         +----> JoinAsFollower
-                     |
-                     +-- rTooFarBehind = TRUE --> [CATCHUP]
-                     |                            joined = FALSE
-                     |
-                     +-- rTooFarBehind = FALSE
-                                  |
-                           send FOLLOW_REQ
-                                  |
-                         [AWAIT_FOLLOW_RES]
-                            joined = FALSE
+       |
+RefreshLeaderState -- (no metadata) --> [ATTEMPT_LEADERSHIP]
+       |                                      |
+(metadata exists)                     AttemptLeadership
+       |                                 /         \
+       |                            (success)    (conflict)
+       |                                |             |
+       v                                |         [REFRESH]
+     [JOIN] <---------------------------+
+       |
+       +---> JoinAsLeader
+       |        |                                  +----------------------+
+       |        +-- (applyIndex < commitIndex) --> | catch-up sub-process |
+       |        |                                  +----------------------+
+       |        |
+       |        +-- (otherwise) -----------------> [READY],joined = TRUE
+       |
+       +---> JoinAsFollower
+                |                              +----------------------+ 
+                +-- (rTooFarBehind = TRUE) --> | catch-up sub-process |
+                |                              +----------------------+
+                |                              +----------------------+ 
+                +-- (rTooFarBehind = FALSE)--> | follow sub-process   |
+                                               +----------------------+ 
 ```
 
-`JoinAsLeader` enters `[CATCHUP]` when the local apply index is behind the cached reservation boundary. Otherwise it marks the replica joined and enters `[READY]`.
+`JoinAsLeader` follows one of two paths:
 
-`JoinAsFollower` either enters `[CATCHUP]`, if previously told it was too far behind, or tries to register itself as a follower with the leader by sending a `FOLLOW_REQ` containing its applied index and enters `[AWAIT_FOLLOW_RES]`. The follow request registers the replica for leader-pushed replication. The request and response transitions are described below under **Follow requests and responses**.
+* Catchup: The replica enters `[CATCHUP]` to initiate the catchup from snapshot and log state
+ when the local apply index is behind the cached reservation boundary (commit index).
+* Join complete: If it is already up-to-date, it marks itself as joined and enters `[READY]`.
 
-The catchup process is documented next.
+`JoinAsFollower` follows one of two paths:
 
-#### Catchup (join process)
+* Catchup: If the replica was previously told it was too far behind for RPC synchronization, on the subsequent join it enters `[CATCHUP]` to bootstrap from S3 state (snapshot and log). Once caught up it retries the follow sub-process.
+* Follow: If the "too far behind" flag is false, the replica sends a `FOLLOW_REQ` request to the leader to register itself as a follower with the leader, and enters `AWAIT_FOLLOW_RES` to receive the response.
+
+#### Catchup (join sub-process)
 
 `CatchUp` repeatedly takes the first applicable branch:
 
-1. `RestoreFromSnapshot`. The replica updates its cached snapshot metadata (if the version differs) and if the stored snapshot is ahead of the replica's apply index, the replica restores its complete state based on the snapshot.
-2. `ReplayOneLogEntry`: The snapshot was previous loaded and the log is replayed. If the next log batch exists in S3, append its entries to the local machine data and advance the apply index.
+1. `RestoreFromSnapshot`. The replica sees its cached snapshot data is stale the replica restores its complete state based on the snapshot and caches the snapshot metadata.
+2. `ReplayOneLogEntry`: The snapshot was previous loaded and the log is being replayed. If the next log batch exists in S3, it append the log batch entries to the local machine data and advances the apply index.
+3. When no more log entries exist to read, it has three options:
+       * The replica did not reach commitIndex or even the prior address, so the replica enters `[ILLEGAL_STATE]`. The address prior to commitIndex should exist.
+       * A **leader** finishing exactly at `commitIndex - 1` sets `rReuseFirstIndex = TRUE`. Its first new batch will use the already-reserved trailing index. A leader that has caught up fully clears this flag. In either case, the replica enters `[READY]` and marks the leader joined.
+       * A **follower** finishing recovery clears `rTooFarBehind` and sends a follow request so the leader can push subsequent batches.
 
-Upon completing log replay:
-* If replay of the log is finished but the replica is short of `commitIndex - 1`, the replica enters `[ILLEGAL_STATE]`.
-* A leader finishing exactly at `commitIndex - 1` sets `rReuseFirstIndex = TRUE`. Its first new batch will use the already-reserved trailing index. A leader that has caught up fully clears this flag. In either case, the replica enters `[READY]` and marks the leader joined.
-* A follower finishing recovery clears `rTooFarBehind` and sends a follow request so the leader can push subsequent batches.
+> The reason for rReuseFirstIndex is that commitIndex is more of a reservation than an actual commit boundary. It's legal for the commitIndex to be unwritten as the former leader might have crashed after advancing the commitIndex but before writing the log entry. Or the former leader might still be going and is in a race to write to the log entry.
 
-> The reason for rReuseFirstIndex is that commitIndex is more of a reservation than an actual commit boundary. It's legal for the commitIndex to be unwritten as the former leader might have crashed after advancing the commitIndex but before writing the log entry. Or the former leader might still be going be in a race to write to the log entry.
+#### Follow requests and responses (join sub-process)
 
-#### Follow requests and responses (Joining as a follower)
-
-If rTooFarBehind is FALSE, then a follower initiates replication by telling the replica named in its cached leader state its applyIndex. This exchange registers the follower and afterward the follower marks itself as joined.
+If the rTooFarBehind flag is FALSE, a follower initiates replication by sending a follow request to the replica named in its cached leader state, including its applyIndex in the request. This exchange registers the follower and afterward the follower marks itself as joined.
 
 `SendFollowReq` sends a `FOLLOW_REQ` and moves the sender to `[AWAIT_FOLLOW_RES]`.
 `RecvFollowReq` handles the request according to the receiver's local role:
 
-- If it believes it is a joined leader, it records the sender in `rFollowIndex` with the supplied `applyIndex` and `pending = FALSE`, then replies with `FOLLOW_RES(result = OK)`. This replaces any previous registration for that sender.
-- If it does not believe it is leader, it replies with `FOLLOW_RES(result = NOT_LEADER)` without registering the sender.
+- If it is a joined leader, it records the sender in `rFollowIndex` with the supplied `applyIndex` and `pending = FALSE`, then replies with `FOLLOW_RES(result = OK)`. This replaces any previous registration for that sender.
+- If it is not a leader, it replies with `FOLLOW_RES(result = NOT_LEADER)` without registering the sender.
 
 `RecvFollowRes` consumes the response. If the follower is still waiting for the response and it is an `OK` response, the follower marks itself as joined and enters `[READY]`.
-A `NOT_LEADER` response causes the replica to enter `[REFRESH]` to read leadership metadata again and rejoin.
+A `NOT_LEADER` response causes the replica to enter `[REFRESH]` to read leadership metadata again and restart the join process.
 
 ```text
 Follower                                      Leader
@@ -167,7 +168,7 @@ SendFollowReq                                    |
    |                                      applyIndex = i
    |                                             |  
    |<--------------------- FOLLOW_RES(OK) -------+
-RecvFollowRes                                    
+RecvFollowRes                                    |
 [READY, joined]                                  
 ```
 
@@ -204,18 +205,20 @@ Appending is split into command reception, reservation, and log creation:
                     [REFRESH]       [READY]
 ```
 
-`ReceiveCommands` chooses a nonempty set of previously unused model values, converts it to a sequence, and prepares a pending batch. Its target index is either `commitIndex + 1` or, when reusing the trailing reservation, `commitIndex` itself.
+`ReceiveCommands` chooses a nonempty set of previously unused model values, converts it to a sequence, and prepares a pending batch. 
 
-The finite, unique `Values` set is a state-space simplification. Values become used when received, even if their batch never succeeds. `auxCommitted`, by contrast, records only successful log writes.
+The target index is either:
+* `commitIndex + 1` under normal circumstances
+* `commitIndex` when `rReuseFirstIndex` is true, which happens when the log entry at the commit index was confirmed to NOT exist during the catchup process and when this is the first batch being written after assuming leadership.
 
-`CommitBatch` normally CAS-updates `leaderState` to reserve the pending index. If the replica's cached version is stale, the executable action moves to `[REFRESH]`. When `rReuseFirstIndex` is true, `CommitBatch` skips the CAS and goes directly to `[APPEND_TO_LOG]`.
+`CommitBatch` normally CAS-updates `leaderState` to reserve the pending index. If the replica's cached version is stale, the replica enters `[REFRESH]` to restart the join process. When `rReuseFirstIndex` is true, `CommitBatch` skips the CAS and goes directly to `[APPEND_TO_LOG]` (as the commmit index is being reused and so is not changing).
 
 `AppendToLog` performs put-if-absent at the pending batch's index:
 
 - If the address exists, the replica enters `[REFRESH]` without applying or committing its values.
 - If the address is free, it creates the batch, appends its entries to local machine state and `auxCommitted`, advances the apply index, and returns to `[READY]`.
 
-Both outcomes clear the pending batch and the reuse flag.
+Both outcomes clear the pending batch and the rReuseFirstIndex flag.
 
 The successful log creation is the modeled write-completion point. **`AppendToLog` does not revalidate the stored leader epoch or version, or check the snapshot boundary.** It relies on the target address being occupied to reject a competing write once another leader has filled it.
 
@@ -231,22 +234,20 @@ Once a follower is registered, the leader pushes batches without waiting for fur
 nextIndex = rFollowIndex[leader][follower].applyIndex + 1
 ```
 
-The `LogIndexWritten` guard allows sending when the cached `commitIndex` is above `nextIndex`, or when it equals `nextIndex` and that index is present in the log or covered by the stored snapshot. Thus an unwritten trailing reservation does not immediately produce an error. A follower already at the cached head also waits for further progress.
+If the nextIndex to send is the `commitIndex` but that index is unwritten in the log, the replica waits until that entry does exist.
 
-When sending is enabled, the message depends on whether the batch still exists:
+One of two messages can be sent:
 
-| Log state | `SYNC_REQ` contents | Leader's tracking update |
-| --- | --- | --- |
-| `log[nextIndex]` exists | `error = None`, `commitIndex = nextIndex`, `batch = log[nextIndex]` | Set `pending = TRUE`. |
-| The required batch is missing | `error = TOO_FAR_BEHIND`, `commitIndex = 0`, `batch = None` | Remove the follower's registration. |
+* **error = None**: The log contains the nextIndex so a non-error request is sent with the log entry batch. The followIndex is updated to Pending=TRUE
+* **error = TOO_FAR_BEHIND**: The required batch is missing (due to GC collecting it as it lies below the snapshot boundary). The request is sent with the error `TOO_FAR_BEHIND` to trigger the follower to bootstrap from S3.
 
 `RecvSyncReq` consumes the request and handles three cases:
 
-- A follower receives an `OK` request and applies the batch only when `msg.commitIndex = rApplyIndex[r] + 1`. It appends the batch's entries to local machine data and advances its applied index.
-- A follower receives `TOO_FAR_BEHIND` sets `rTooFarBehind = TRUE` and enters `[REFRESH]`, preserving its current machine data and applied index. In the rejoin process, it will see `rTooFarBehind` and do catchup from S3.
-- In all other cases, including duplicate batches, batches that skip an index, or a receiver that believes it is leader, machine state remains unchanged.
+- **A follower receives an `OK`** request and applies the batch only when `msg.commitIndex = rApplyIndex[r] + 1`. It appends the batch's entries to local machine data and advances its applied index.
+- **A follower receives `TOO_FAR_BEHIND`** request and sets `rTooFarBehind = TRUE` and enters `[REFRESH]`, preserving its current machine data and applied index. In the rejoin process, it will see `rTooFarBehind` and do catchup from S3.
+- **In all other cases**, including duplicate batches, batches that skip an index, or a receiver that believes it is leader, machine state remains unchanged.
 
-Every case replies with `SYNC_RES(applyIndex = current applied index)`, using the updated index if the batch was applied.
+**Every case** replies with `SYNC_RES(applyIndex = current applied index)`, using the updated index if the batch was applied.
 
 `RecvSyncRes` sets the sender's tracked follower index to the reported index and clears `pending`, provided the receiver still believes it is leader, is joined, and still has that follower registered. Otherwise it consumes the response and clears any registration for that sender. A response to `TOO_FAR_BEHIND` does not itself re-register the follower.
 
@@ -293,7 +294,9 @@ Sync messages contain no epoch, and acceptance does not check the sender against
 
 `CommitSnapshot` publishes the pending snapshot if the stored snapshot is absent or its version matches the replica's cached snapshot version. Success updates the replica's snapshot reference and returns it to `[READY]`.
 
-On a version conflict the replica enters `[REFRESH]`.
+On a version conflict the replica enters `[REFRESH]`. 
+
+> Note that the implementation treats a snapshot version conflict as a leader change event that results in an illegal state exception. But there are valid histories where a stale leader commits a snapshot, then the current leader does the same, causing a conflict without leader change. Thus this spec does not treat a snapshot version conflict as a leader change (to avoid the illegal state).
 
 Snapshot publication does not CAS the leader state or validate current leadership on the success path. Its condition is the snapshot object's own version. Snapshot preparation and batch appending by the same replica are serialized through `rState`, while other replicas and the network may continue progressing.
 
@@ -307,9 +310,9 @@ Publishing a snapshot does not itself delete log batches. Deletion is a separate
 batch index < snapshot.applyIndex
 ```
 
-Deleting snapshot-covered data preserves the recoverable history at that moment. The problem is that deletion also removes the object that would reject a delayed put-if-absent from an earlier leader.
-
 ## Consistency violation caused by GC
+
+There is a small window of opportunity for GC to interact with a leader change and a stale leader write.
 
 Consider two replicas, `r1` and `r2`, and three distinct singleton batches, `A`, `B`, and `C`. The following execution is permitted by the model:
 
@@ -349,7 +352,7 @@ Without the deletion in step 7, `log[1]` still contains `B`, so `r1`'s delayed p
 
 The leader-state CAS cannot prevent this execution because `r1` already passed its reservation step. Eventual leadership-change detection is also insufficient: it can occur after the delayed write. No weak-fairness assumption forbids a finite delay lasting through snapshotting and GC.
 
-This sequence was checked with a targeted TLC replay against `S2C.tla`, using two replicas, three values, `MaxEpoch = 2`, and `GcEnabled = TRUE`. The replay visited 24 states, including initialization, and confirmed that both history properties hold before the final append and fail afterward. This validates the specific counterexample, rather than an exhaustive exploration of all behaviors.
+> A variant spec, S2CFencing.tla, solves this bug.
 
 ## Invariants
 

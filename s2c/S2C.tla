@@ -270,12 +270,13 @@ JoinAsFollower(r) ==
 
 \* Snapshot restore -----------------
 
-NeedsSnapshotRestore(r) ==
-    SnapshotVersion(rSnapshot[r]) /= SnapshotVersion(snapshot)
-
 SnapshotCoversApplyIndex(r) ==
     /\ snapshot /= None
     /\ ApplyIndex(r) < snapshot.applyIndex
+
+NeedsSnapshotRestore(r) ==
+    \/ SnapshotVersion(rSnapshot[r]) /= SnapshotVersion(snapshot)
+    \/ SnapshotCoversApplyIndex(r)
 
 \* If the snapshot covers the current applyIndex then overwrite
 \* local state with the snapshot. No matter what, update
