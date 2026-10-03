@@ -27,40 +27,23 @@ So far.
 
 ### Category 1: Single-writer WALs
 
-* [SlateDB WAL protocol](slatedb/SlateDBWAL.tla)
-    * [Spec desc](slatedb/SlateDBWAL_notes.md)
-    * Source https://github.com/slatedb/slatedb
-* [SlateDB WAL protocol CAS variant](slatedb/SlateDBWAL_CAS.tla)
-    * [Spec desc](slatedb/SlateDBWAL_CAS_notes.md)
-* [BufferAsWAL](opendata/BufferAsWAL.tla)
-    * [Spec desc](opendata/BufferAsWAL_notes.md)
-    * I modified the Buffer design to make it work as a single-writer WAL
-* [Objwal](/jay-jamieson-objwal/ObjWAL.tla)
-    * [Spec desc](jay-jamieson-objwal/ObjWAL_notes.md)
-    * Source: https://github.com/JayJamieson/objwal
-* [Shared Storage Consensus](s2c/S2C.tla): 
-    * [Spec description](s2c/S2C_notes.md)
-    * Source https://github.com/io-s2c/s2c
-* [Shared Storage Consensus, fencing variant](s2c/S2CFencing.tla): 
-    * [Spec description](s2c/S2CFencing_notes.md)
+| Design / specification | Spec description | Sources | Notes |
+| --- | --- | --- | --- |
+| [SlateDB WAL protocol](slatedb/SlateDBWAL.tla) | [Description](slatedb/SlateDBWAL_notes.md) | [GitHub](https://github.com/slatedb/slatedb) | — |
+| [SlateDB WAL protocol CAS variant](slatedb/SlateDBWAL_CAS.tla) | [Description](slatedb/SlateDBWAL_CAS_notes.md) | — | The variant uses a single manifest written via CAS |
+| [BufferAsWAL](opendata/BufferAsWAL.tla) | [Description](opendata/BufferAsWAL_notes.md) | — | I modified the Buffer design to make it work as a single-writer WAL. |
+| [Objwal](/jay-jamieson-objwal/ObjWAL.tla) | [Description](jay-jamieson-objwal/ObjWAL_notes.md) | [GitHub](https://github.com/JayJamieson/objwal) | — |
+| [Shared Storage Consensus](s2c/S2C.tla) | [Description](s2c/S2C_notes.md) | [GitHub](https://github.com/io-s2c/s2c) | — |
+| [Shared Storage Consensus, fencing variant](s2c/S2CFencing.tla) | [Description](s2c/S2CFencing_notes.md) | — | The variant fixes a somewhat theoretical consistency bug in S2C |
 
 ### Category 2: Multi-writer WALs
 
-* [OSWALD](oswald/)
-    * Spec desc, TODO
-    * Source: https://nvartolomei.com/oswald, https://github.com/nvartolomei/oswald/tree/main/p
-    * Implementations: https://github.com/rockwotj/chorus though its single-writer I believe.
-* [Cursor Continuity](cursor/Continuity.tla)
-    * [Spec desc](cursor/Continuity_notes.md)
-    * Source: https://cursor.com/blog/git-at-any-scale
-* [Conflux (Virtual Consensus, LogDrive)](https://github.com/Vanlightly/log-drive-specs/blob/main/tlaplus/AtomicLog.tla)
-    * Spec desc, TODO
-    * TODO: Make a simplified version for this repo.
-    * Source: https://www.usenix.org/system/files/osdi20-balakrishnan.pdf and https://www.usenix.org/system/files/osdi26-vickers.pdf
-    *  Some writing: https://jack-vanlightly.com/blog/2026/8/25/the-logdrive-flexible-composition-through-abstraction-in-shared-logs
-* [Walgit](/walgit/Walgit.tla)
-    * [Spec desc](walgit/walgit_notes.md)
-    * Source: https://github.com/tobi/walgit/tree/main
+| Design / specification | Spec description | Sources | Notes |
+| --- | --- | --- | --- |
+| [OSWALD](oswald/) | TODO | [Article](https://nvartolomei.com/oswald), [GitHub](https://github.com/nvartolomei/oswald/tree/main/p) | Implementation: [Chorus](https://github.com/rockwotj/chorus), though I believe it's single-writer. |
+| [Cursor Continuity](cursor/Continuity.tla) | [Description](cursor/Continuity_notes.md) | [Blog post](https://cursor.com/blog/git-at-any-scale) | — |
+| [Conflux (Virtual Consensus, LogDrive)](https://github.com/Vanlightly/log-drive-specs/blob/main/tlaplus/AtomicLog.tla) | TODO | [OSDI 2020 paper](https://www.usenix.org/system/files/osdi20-balakrishnan.pdf), [OSDI 2026 paper](https://www.usenix.org/system/files/osdi26-vickers.pdf) | TODO: Make a simplified version for this repo. Further writing: [The LogDrive](https://jack-vanlightly.com/blog/2026/8/25/the-logdrive-flexible-composition-through-abstraction-in-shared-logs). |
+| [Walgit](/walgit/Walgit.tla) | [Description](walgit/walgit_notes.md) | [GitHub](https://github.com/tobi/walgit/tree/main) | — |
 
 ### Category 3: Not quite a WAL but a log or log-like
 
