@@ -228,8 +228,9 @@ CompleteReplay(r) ==
 ReplayWAL(r) ==
     /\ rState[r] = REPLAY_WAL
     /\ CASE ShouldCompleteReplay(r) -> CompleteReplay(r)
-         [] ShouldLoadCheckpoint(r) -> LoadCheckpoint(r)
-         [] ShouldLoadNextSegment(r) -> ReplayNextSegment(r)
+         [] ~ShouldCompleteReplay(r) /\ ShouldLoadCheckpoint(r) -> LoadCheckpoint(r)
+         [] ~ShouldCompleteReplay(r) /\ ~ShouldLoadCheckpoint(r)
+            /\ ShouldLoadNextSegment(r) -> ReplayNextSegment(r)
          [] OTHER -> IllegalState(r)
     /\ UNCHANGED <<storeVars, auxVars>>
 
@@ -357,7 +358,8 @@ CheckSlot(r) ==
                   /\ UNCHANGED <<rOperation, rPendingValue>> 
          \* CASE 2 - The candidate seq is uncommitted and free, so 
          \*          it can be claimed again. Transition to CLAIM_SLOT
-         [] /\ rCandidateSeq[r] > manifest.headSeq
+         [] /\ ~(rAppliedSeq[r] < manifest.headSeq)
+            /\ rCandidateSeq[r] > manifest.headSeq
             /\ rCandidateSeq[r] \notin DOMAIN logSegments ->
                   /\ rState' = [rState EXCEPT ![r] = CLAIM_SLOT]
                   /\ UNCHANGED <<rOperation, rPendingValue, rCandidateSeq, rBurned>>
@@ -365,7 +367,8 @@ CheckSlot(r) ==
          \*          add it to the burn set, advance the candidate seq 
          \*          and transition to CLAIM_SLOT to try and claim a 
          \*          slot again.
-         [] /\ rCandidateSeq[r] > manifest.headSeq
+         [] /\ ~(rAppliedSeq[r] < manifest.headSeq)
+            /\ rCandidateSeq[r] > manifest.headSeq
             /\ rCandidateSeq[r] \in DOMAIN logSegments ->
                   /\ LET id     == rCandidateSeq[r]
                          burned == [id |-> id, attemptKey |-> logSegments[id].attemptKey]
