@@ -687,9 +687,12 @@ ValidManifest ==
         /\ s1.id /= s2.id
         /\ s1.firstSeq < s2.firstSeq
         /\ s1.lastSeq >= s2.firstSeq
-    \* One segment must represent the headSeq
-    /\ \E s \in manifest.logSegments :
-        s.lastSeq = manifest.headSeq
+    \* The checkpoint or a remaining segment must cover headSeq.
+    /\ LET cpSeq == IF manifest.checkpoint = None THEN 0
+                   ELSE manifest.checkpoint.seq
+       IN /\ cpSeq <= manifest.headSeq
+          /\ (cpSeq < manifest.headSeq =>
+                \E s \in manifest.logSegments : s.lastSeq = manifest.headSeq)
     \* There can be no segments whose range is above the headSeq
     /\ ~\E s \in manifest.logSegments :
         s.firstSeq > manifest.headSeq
