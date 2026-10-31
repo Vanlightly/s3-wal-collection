@@ -41,9 +41,9 @@ So far.
 
 | Design / specification | Spec description | Sources | Notes |
 | --- | --- | --- | --- |
+| [Conflux (Virtual Consensus, LogDrive)](conflux/spec/Conflux.tla) | [Description](conflux/Conflux_notes.md) | [Virtual Consensus in Delos OSDI 2020](https://www.usenix.org/system/files/osdi20-balakrishnan.pdf), [LogDrive OSDI 2026](https://www.usenix.org/system/files/osdi26-vickers.pdf) | [LogDrive blog](https://jack-vanlightly.com/blog/2026/8/25/the-logdrive-flexible-composition-through-abstraction-in-shared-logs). |
 | [OSWALD](oswald/) | TODO | [Article](https://nvartolomei.com/oswald), [GitHub](https://github.com/nvartolomei/oswald/tree/main/p) | Implementation: [Chorus](https://github.com/rockwotj/chorus), though I believe it's single-writer. |
 | [Cursor Continuity](cursor/Continuity.tla) | [Description](cursor/Continuity_notes.md) | [Blog post](https://cursor.com/blog/git-at-any-scale) | — |
-| [Conflux (Virtual Consensus, LogDrive)](https://github.com/Vanlightly/log-drive-specs/blob/main/tlaplus/AtomicLog.tla) | TODO | [OSDI 2020 paper](https://www.usenix.org/system/files/osdi20-balakrishnan.pdf), [OSDI 2026 paper](https://www.usenix.org/system/files/osdi26-vickers.pdf) | TODO: Make a simplified version for this repo. Further writing: [The LogDrive](https://jack-vanlightly.com/blog/2026/8/25/the-logdrive-flexible-composition-through-abstraction-in-shared-logs). |
 | [Walgit](/walgit/Walgit.tla) | [Description](walgit/walgit_notes.md) | [GitHub](https://github.com/tobi/walgit/tree/main) | — |
 
 ### Category 3: Not quite a WAL but a log or log-like
