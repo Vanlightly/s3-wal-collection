@@ -50,14 +50,16 @@ The shared WAL replay and missing-packfile recovery transitions below also apply
                      v
      +-------->[GET_WAL_INDEX]
      |               |
-     |          GetWalIndex --(repo behind)--> [REPLAY_WAL_INDEX]
-     |               |                                |
-     |         (repo caught up)                  ReplayWalIndex
-     |               |                                |
-     |               v                                |
-     |       [APPEND_WAL_INDEX]<----------------------+
+     |          GetWalIndex --(repo behind)--+
+     |               |                       |
+     |               |                       v
+     |         (repo caught up)      [REPLAY_WAL_INDEX]              
+     |               |                       |
+     |               |                 ReplayWalIndex
+     |               v                       |
+     |       [APPEND_WAL_INDEX]<-------------+
      |               |
-CAS failed)-- AppendToWalIndex
+(CAS failed)-- AppendToWalIndex
                      |
                 (CAS success, 
                  apply entry)
