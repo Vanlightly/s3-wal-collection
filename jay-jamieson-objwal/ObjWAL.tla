@@ -163,9 +163,9 @@ SnapshotRecovery(r) ==
     The application state machine replays the WAL entries
     (which are the committed values above the snapshot seq).
 
-    Each invocation replays one WAL entry. Once the 
-    replay seq has reached the manigest nextSeq, replay
-    is over and the replica transitions to READY.
+    Each invocation replays the entries of one WAL segment. 
+    Once the replay seq has reached the manifest nextSeq, 
+    replay is over and the replica transitions to READY.
 -----------------------------------------------------------*)
 
 ReplayWAL(r) ==
