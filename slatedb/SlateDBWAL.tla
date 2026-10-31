@@ -491,10 +491,8 @@ CommitSnapshot(w) ==
            newManifestId == wManifest[w].id + 1
            newManifest == [wManifest[w] EXCEPT !.id = newManifestId,
                                                !.replayAfterWalId = snapshotId + 1]
-        \*    currBoundary == boundary.manifestId
        IN
           \/ /\ newManifestId \in DOMAIN manifest
-                \* \/ newManifestId <= currBoundary
              /\ wState' = [wState EXCEPT ![w] = FENCED]
              /\ UNCHANGED <<manifest, wManifest>>
           \/ /\ newManifestId \notin DOMAIN manifest

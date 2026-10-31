@@ -33,7 +33,9 @@ All the states up to READY.
     +--------------------------+        |
                                         v
                +------------------>[WRITE_FENCE]
-               |                     |        |
+               |                         |
+               |                  WriteFenceWalEntry
+               |                   |            |
                |            (cond failed)   (success)              
           (manifest valid)         |            |
                |                   v            v
